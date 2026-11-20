@@ -9,99 +9,131 @@ permissions:
 
 jobs:
   build:
+    name: Linux x64 - CUDA 12.8 + Vulkan
     runs-on: ubuntu-24.04
 
     container:
-      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
+      image: nvidia/cuda:12.8.2-devel-ubuntu24.04
+
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Install dependencies
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+
+          apt-get install -y --no-install-recommends \
             git \
+            build-essential \
             cmake \
             ninja-build \
-            build-essential \
-            libvulkan-dev \
-            glslc \
-            spirv-headers \
             libssl-dev \
-            ca-certificates
+            jq \
+            python3-venv \
+            glslc \
+            libvulkan-dev \
+            spirv-headers \
+            mesa-vulkan-drivers
 
       - name: Checkout llama.cpp
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ggml-org/llama.cpp
           ref: master
-          path: llama.cpp
+          fetch-depth: 0
 
-      - name: Verify CUDA compiler
+      - name: Configure Git safe directory
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Verify toolchain
         run: |
           nvcc --version
-          nvcc --list-gpu-arch
+          cmake --version
+          ninja --version
+          glslc --version
 
-      - name: Prepare CUDA driver stub for linking
+      - name: Configure CUDA + Vulkan
         run: |
-          CUDA_STUB="$(find /usr/local/cuda \
-            -path '*/stubs/libcuda.so' -print -quit)"
-
-          if [ -z "$CUDA_STUB" ]; then
-            echo "CUDA driver stub not found"
-            exit 1
-          fi
-
-          mkdir -p /tmp/cuda-link
-          ln -sf "$CUDA_STUB" /tmp/cuda-link/libcuda.so.1
-
-          echo "Using CUDA stub: $CUDA_STUB"
-          ls -l /tmp/cuda-link/
-
-      - name: Configure llama.cpp
-        working-directory: llama.cpp
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_ARCHITECTURES=86 \
-            -DGGML_CUDA=ON \
-            -DGGML_VULKAN=ON \
+          cmake -B build -G Ninja \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_BACKEND_DL=ON \
             -DGGML_NATIVE=OFF \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_CUDA=ON \
+            -DGGML_CUDA_NCCL=OFF \
+            -DGGML_CUDA_CCCL_VERSION=v3.4.3 \
+            -DGGML_VULKAN=ON \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_TOOLS=ON \
             -DLLAMA_BUILD_SERVER=ON \
-            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,/tmp/cuda-link"
+            -DGGML_RPC=ON \
+            -DLLAMA_CONNECT=ON
 
-      - name: Compile llama.cpp
-        working-directory: llama.cpp
+      - name: Compile
         run: |
-          cmake --build build --parallel 2
+          cmake --build build \
+            --config Release \
+            --parallel 2
 
       - name: Verify backend libraries
-        working-directory: llama.cpp
         run: |
-          test -f build/bin/libggml-cuda.so.1.0.0
-          test -f build/bin/libggml-vulkan.so.1.0.0
+          echo "Checking CUDA backend"
+          find build/bin -maxdepth 1 -name '*cuda*' -type f
 
-          echo "CUDA backend:"
-          ls -lh build/bin/libggml-cuda.so*
+          echo "Checking Vulkan backend"
+          find build/bin -maxdepth 1 -name '*vulkan*' -type f
 
-          echo "Vulkan backend:"
-          ls -lh build/bin/libggml-vulkan.so*
+          test -n "$(find build/bin -maxdepth 1 \
+            -name 'libggml-cuda.so*' -print -quit)"
 
-      - name: Package binaries
-        working-directory: llama.cpp
+          test -n "$(find build/bin -maxdepth 1 \
+            -name 'libggml-vulkan.so*' -print -quit)"
+
+      - name: Verify server executable
         run: |
-          mkdir -p ../llama-multigpu
+          test -x build/bin/llama-server
+          build/bin/llama-server --version
 
-          cp -a build/bin/. ../llama-multigpu/
+      - name: Package llama.cpp
+        run: |
+          mkdir -p package
 
-          tar -czf ../llama-multigpu.tar.gz \
-            -C .. llama-multigpu
+          cp -a build/bin/. package/
+          cp LICENSE package/
 
-          sha256sum ../llama-multigpu.tar.gz
+          tar -czf llama-cuda-vulkan-linux-x64.tar.gz \
+            -C package .
 
-      - name: Upload build artifact
+          sha256sum llama-cuda-vulkan-linux-x64.tar.gz
+
+      - name: Package CUDA runtime libraries
+        run: |
+          mkdir -p cudart
+
+          cp -L /usr/local/cuda/lib64/libcudart.so.12 cudart/
+          cp -L /usr/local/cuda/lib64/libcublas.so.12 cudart/
+          cp -L /usr/local/cuda/lib64/libcublasLt.so.12 cudart/
+
+          tar -czf llama-cuda-runtime-12.tar.gz \
+            -C cudart .
+
+      - name: Upload llama.cpp artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llama-cuda-vulkan-linux
-          path: llama-multigpu.tar.gz
+          name: llama-cuda-vulkan-linux-x64
+          path: llama-cuda-vulkan-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload CUDA runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-cuda-runtime-12
+          path: llama-cuda-runtime-12.tar.gz
           if-no-files-found: error
           retention-days: 7
