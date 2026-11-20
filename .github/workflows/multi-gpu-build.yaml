@@ -1,0 +1,65 @@
+
+name: Build llama.cpp - CUDA + Vulkan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    container:
+      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git cmake ninja-build build-essential \
+            libvulkan-dev glslc spirv-headers \
+            libssl-dev
+
+      - name: Checkout llama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: master
+          path: llama.cpp
+
+      - name: Verify CUDA compiler
+        run: nvcc --version
+
+      - name: Configure
+        working-directory: llama.cpp
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=ON \
+            -DGGML_VULKAN=ON \
+            -DGGML_NATIVE=OFF \
+            -DCMAKE_CUDA_ARCHITECTURES=86 \
+            -DLLAMA_BUILD_SERVER=ON
+
+      - name: Compile
+        working-directory: llama.cpp
+        run: |
+          cmake --build build --parallel 2
+
+      - name: Package
+        working-directory: llama.cpp
+        run: |
+          mkdir -p ../llama-multigpu
+          cp -a build/bin/. ../llama-multigpu/
+          tar -czf ../llama-multigpu.tar.gz \
+            -C .. llama-multigpu
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-cuda-vulkan-linux
+          path: llama-multigpu.tar.gz
+          retention-days: 7
